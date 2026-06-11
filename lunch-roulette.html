@@ -804,7 +804,10 @@
       const index = pickIndex();
       const segment = 360 / choices.length;
       const targetCenter = index * segment + segment / 2;
-      const finalRotation = 360 * (5 + Math.floor(Math.random() * 3)) + (360 - targetCenter);
+      const currentAngle = ((currentRotation % 360) + 360) % 360;
+      const targetAngle = (360 - targetCenter) % 360;
+      const correction = (targetAngle - currentAngle + 360) % 360;
+      const finalRotation = 360 * (5 + Math.floor(Math.random() * 3)) + correction;
       currentRotation += finalRotation;
       canvas.style.transform = `rotate(${currentRotation}deg)`;
 
