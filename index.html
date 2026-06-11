@@ -497,9 +497,12 @@
           <div class="tools">
             <button class="btn secondary" id="shuffleBtn" type="button">打亂順序</button>
             <button class="btn secondary" id="sampleBtn" type="button">補回預設</button>
+            <button class="btn secondary" id="exportBtn" type="button">匯出 JSON</button>
+            <button class="btn secondary" id="importBtn" type="button">匯入 JSON</button>
             <button class="btn warn" id="clearHistoryBtn" type="button">清紀錄</button>
             <button class="btn warn" id="resetBtn" type="button">全部重設</button>
           </div>
+          <input id="importFile" type="file" accept="application/json,.json" hidden>
         </section>
 
         <section class="panel-section">
@@ -517,6 +520,8 @@
     const defaults = ["牛肉麵", "滷肉飯", "便當", "水餃", "咖哩飯", "拉麵", "義大利麵", "雞肉飯", "鍋燒意麵", "健康餐"];
     const palette = ["#e64f2e", "#f2b705", "#0f7b63", "#2f6f9f", "#f08a4b", "#7a5cff", "#d13f64", "#4b9f47", "#284b63", "#ef6f6c"];
     const stateKey = "lunch-roulette-state-v1";
+    const historyLimit = 100;
+    const visibleHistoryCount = 8;
     const canvas = document.querySelector("#wheel");
     const ctx = canvas.getContext("2d");
     const spinBtn = document.querySelector("#spinBtn");
@@ -531,6 +536,7 @@
     const emptyHistory = document.querySelector("#emptyHistory");
     const toast = document.querySelector("#toast");
     const dateText = document.querySelector("#dateText");
+    const importFile = document.querySelector("#importFile");
 
     let choices = [];
     let history = [];
@@ -539,27 +545,55 @@
     let toastTimer = 0;
     let selectedChoice = "";
 
+    function normalizeHistoryItem(item) {
+      if (typeof item === "string") {
+        return {
+          choice: item,
+          time: "",
+          timestamp: ""
+        };
+      }
+      if (!item || typeof item !== "object") return null;
+      const choice = String(item.choice || "").trim();
+      if (!choice) return null;
+      return {
+        choice,
+        time: String(item.time || ""),
+        timestamp: String(item.timestamp || "")
+      };
+    }
+
+    function cleanChoices(items) {
+      if (!Array.isArray(items)) return [];
+      return [...new Set(items.map(item => String(item).trim()).filter(Boolean))];
+    }
+
     function loadState() {
       try {
         const saved = JSON.parse(localStorage.getItem(stateKey));
         if (saved && Array.isArray(saved.choices)) {
-          choices = saved.choices.filter(Boolean);
-          history = Array.isArray(saved.history) ? saved.history.slice(0, 8) : [];
+          choices = cleanChoices(saved.choices);
+          history = Array.isArray(saved.history)
+            ? saved.history.map(normalizeHistoryItem).filter(Boolean).slice(0, historyLimit)
+            : [];
           avoidRepeat.checked = saved.avoidRepeat !== false;
+          selectedChoice = String(saved.selectedChoice || "");
         }
       } catch (error) {
         choices = [];
         history = [];
       }
       if (choices.length === 0) choices = [...defaults];
-      selectedChoice = history[0]?.choice || "";
+      selectedChoice = selectedChoice || history[0]?.choice || "";
     }
 
     function saveState() {
       localStorage.setItem(stateKey, JSON.stringify({
+        version: 1,
         choices,
         history,
-        avoidRepeat: avoidRepeat.checked
+        avoidRepeat: avoidRepeat.checked,
+        selectedChoice
       }));
     }
 
@@ -574,6 +608,64 @@
       const query = selectedChoice ? `附近 ${selectedChoice}` : "附近 午餐";
       mapLink.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
       mapLink.setAttribute("aria-label", `在 Google 地圖搜尋${query}`);
+    }
+
+    function downloadJson() {
+      const payload = {
+        app: "lunch-roulette",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        choices,
+        history,
+        avoidRepeat: avoidRepeat.checked,
+        selectedChoice
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const date = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `lunch-roulette-${date}.json`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast("已下載 JSON 備份");
+    }
+
+    function importJsonFile(file) {
+      if (!file) return;
+      const reader = new FileReader();
+      reader.addEventListener("load", () => {
+        try {
+          const imported = JSON.parse(reader.result);
+          const nextChoices = cleanChoices(imported.choices);
+          const nextHistory = Array.isArray(imported.history)
+            ? imported.history.map(normalizeHistoryItem).filter(Boolean).slice(0, historyLimit)
+            : [];
+
+          if (nextChoices.length < 2) {
+            showToast("JSON 至少需要 2 個午餐選項。");
+            return;
+          }
+
+          const shouldImport = window.confirm("匯入 JSON 會取代目前選項與紀錄，確定要匯入嗎？");
+          if (!shouldImport) return;
+
+          choices = nextChoices;
+          history = nextHistory;
+          selectedChoice = String(imported.selectedChoice || history[0]?.choice || "");
+          avoidRepeat.checked = imported.avoidRepeat !== false;
+          resultText.textContent = selectedChoice || "先轉一下";
+          saveAndRender();
+          showToast("已匯入 JSON 備份");
+        } catch (error) {
+          showToast("JSON 格式無法讀取。");
+        } finally {
+          importFile.value = "";
+        }
+      });
+      reader.readAsText(file);
     }
 
     function drawWheel() {
@@ -665,7 +757,7 @@
     function renderHistory() {
       historyList.innerHTML = "";
       emptyHistory.hidden = history.length > 0;
-      history.forEach(item => {
+      history.slice(0, visibleHistoryCount).forEach(item => {
         const li = document.createElement("li");
         const name = document.createElement("b");
         const time = document.createElement("span");
@@ -722,9 +814,10 @@
         resultText.textContent = choice;
         history.unshift({
           choice,
-          time: new Intl.DateTimeFormat("zh-TW", { hour: "2-digit", minute: "2-digit" }).format(new Date())
+          time: new Intl.DateTimeFormat("zh-TW", { hour: "2-digit", minute: "2-digit" }).format(new Date()),
+          timestamp: new Date().toISOString()
         });
-        history = history.slice(0, 8);
+        history = history.slice(0, historyLimit);
         spinning = false;
         spinBtn.textContent = "再轉";
         saveAndRender();
@@ -764,8 +857,20 @@
       showToast("已補回預設選項");
     });
 
+    document.querySelector("#exportBtn").addEventListener("click", downloadJson);
+
+    document.querySelector("#importBtn").addEventListener("click", () => {
+      importFile.click();
+    });
+
+    importFile.addEventListener("change", () => {
+      importJsonFile(importFile.files[0]);
+    });
+
     document.querySelector("#clearHistoryBtn").addEventListener("click", () => {
       history = [];
+      selectedChoice = "";
+      resultText.textContent = "先轉一下";
       saveAndRender();
       showToast("已清除最近結果");
     });
@@ -791,6 +896,7 @@
     }).format(new Date());
 
     loadState();
+    if (selectedChoice) resultText.textContent = selectedChoice;
     saveAndRender();
   </script>
 </body>
