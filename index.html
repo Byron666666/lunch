@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>午餐晚餐輪盤</title>
+  <title>轉盤</title>
   <style>
     :root {
       color-scheme: light;
@@ -115,7 +115,7 @@
 
     .wheel-wrap {
       position: relative;
-      width: min(92vw, 520px);
+      width: min(100%, 520px);
       aspect-ratio: 1;
       display: grid;
       place-items: center;
@@ -451,38 +451,44 @@
   <div class="app">
     <header>
       <div>
-        <h1>午餐晚餐輪盤</h1>
-        <p class="subtitle">把想吃的店或餐點丟進來，按中間開始轉。選項會自動存在這台電腦的瀏覽器裡。</p>
+        <h1>轉盤</h1>
+        <p class="subtitle">選一份清單，讓轉盤幫你決定。Google 登入後可跨裝置同步。</p>
       </div>
       <div class="today">
-        <strong id="dateText">今天午餐晚餐</strong>
+        <strong id="dateText">今天</strong>
         <span id="choiceCount">0 個選項</span>
       </div>
     </header>
 
+    <section class="lists-panel" style="padding:20px;background:white;border:1px solid #d9dee7;border-radius:8px;margin-bottom:24px" aria-label="我的清單與帳號">
+      <div class="tools"><button class="btn" id="login">Google 登入</button><span id="accountName"></span><button class="btn secondary" id="logout" hidden>登出</button><span id="syncStatus" role="status">本機儲存</span></div>
+      <label for="listSelect" style="display:block;margin:16px 0 8px">我的清單</label>
+      <select id="listSelect" style="width:100%;padding:12px;font:inherit;margin-bottom:12px" aria-label="切換輪盤清單"></select>
+      <form id="listForm" class="add-row"><input id="listName" type="text" maxlength="40" required placeholder="新清單名稱，例如：週末活動" aria-label="新清單名稱"><button class="btn" id="createListBtn">新增清單</button></form>
+    </section>
     <main>
-      <section class="stage" aria-label="午餐晚餐輪盤區">
+      <section class="stage" aria-label="轉盤區">
         <div class="wheel-wrap">
           <div class="pointer" aria-hidden="true"></div>
-          <canvas id="wheel" width="900" height="900" aria-label="可旋轉的午餐晚餐輪盤"></canvas>
+          <canvas id="wheel" width="900" height="900" aria-label="可旋轉的轉盤"></canvas>
           <div class="hub">
             <button id="spinBtn" type="button">開始</button>
           </div>
         </div>
         <div class="result" aria-live="polite">
-          <div class="label">今天吃</div>
+          <div class="label">抽選結果</div>
           <div class="choice" id="resultText">先轉一下</div>
           <div class="result-actions">
-            <a class="map-link" id="mapLink" href="https://www.google.com/maps/search/?api=1&query=%E9%99%84%E8%BF%91%20%E5%8D%88%E9%A4%90%E6%99%9A%E9%A4%90" target="_blank" rel="noopener">Google 地圖搜尋</a>
+            <a class="map-link" id="mapLink" href="https://www.google.com/maps" target="_blank" rel="noopener">Google 地圖搜尋</a>
           </div>
         </div>
       </section>
 
       <aside class="control-panel" aria-label="輪盤設定">
         <section class="panel-section">
-          <h2>午餐晚餐選項</h2>
+          <h2 id="currentListTitle">清單選項</h2>
           <form class="add-row" id="addForm">
-            <input id="newChoice" type="text" placeholder="例如：牛肉麵、便當、咖哩飯" maxlength="24" autocomplete="off">
+            <input aria-label="新增選項" id="newChoice" type="text" placeholder="輸入新的選項" maxlength="24" autocomplete="off">
             <button class="btn" type="submit">新增</button>
           </form>
           <label class="switch">
@@ -500,7 +506,7 @@
             <button class="btn secondary" id="exportBtn" type="button">匯出 JSON</button>
             <button class="btn secondary" id="importBtn" type="button">匯入 JSON</button>
             <button class="btn warn" id="clearHistoryBtn" type="button">清紀錄</button>
-            <button class="btn warn" id="resetBtn" type="button">全部重設</button>
+            <button class="btn warn" id="resetBtn" type="button">重設目前清單</button>
           </div>
           <input id="importFile" type="file" accept="application/json,.json" hidden>
         </section>
@@ -516,6 +522,443 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore-compat.js"></script>
+  <script>(() => {
+  "use strict";
+
+  const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  const safeKey = (key) => !["__proto__", "constructor", "prototype"].includes(key);
+  const copy = (value) => JSON.parse(JSON.stringify(value));
+  const canonical = (value) => JSON.stringify(value, function (_key, item) {
+    return isObject(item)
+      ? Object.fromEntries(Object.keys(item).filter(safeKey).sort().map((key) => [key, item[key]]))
+      : item;
+  });
+  const equal = (left, right) => canonical(left) === canonical(right);
+
+  // Record only the fields the learner changed. Absence is an explicit deletion,
+  // so moving a learned word back to "new" is also synchronized.
+  function differences(before, after, path = [], result = []) {
+    for (const key of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
+      if (!safeKey(key)) continue;
+      const nextPath = [...path, key];
+      if (!owns(after || {}, key)) result.push({ path: nextPath, remove: true });
+      else if (isObject(after[key]) && (isObject(before?.[key]) || before?.[key] === undefined)) {
+        differences(before?.[key] || {}, after[key], nextPath, result);
+      } else if (!equal(before?.[key], after[key])) {
+        result.push({ path: nextPath, value: copy(after[key]) });
+      }
+    }
+    return result;
+  }
+
+  function applyOperations(state, operations) {
+    const next = copy(state);
+    for (const operation of [...operations].sort((a, b) => a.sequence - b.sequence)) {
+      const path = operation.path;
+      if (!Array.isArray(path) || !path.length || !path.every((key) => typeof key === "string" && safeKey(key))) continue;
+      let target = next;
+      for (const key of path.slice(0, -1)) {
+        if (!isObject(target[key])) target[key] = {};
+        target = target[key];
+      }
+      const key = path[path.length - 1];
+      if (operation.remove) delete target[key];
+      else target[key] = copy(operation.value);
+    }
+    return next;
+  }
+
+  function addMissing(server, local) {
+    const merged = copy(server);
+    for (const [key, value] of Object.entries(local || {})) {
+      if (!safeKey(key)) continue;
+      if (!owns(merged, key)) merged[key] = copy(value);
+      else if (isObject(merged[key]) && isObject(value)) merged[key] = addMissing(merged[key], value);
+    }
+    return merged;
+  }
+
+  function create(options) {
+    const { db, getDocument, storagePrefix, readLocal, applyLocal, fromCloud, toCloud, setStatus } = options;
+    const writer = window.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const prefix = `${storagePrefix}.sync.v2`;
+    const ownerKey = `${prefix}.owner`;
+    let storageFailed = false;
+    let user = null;
+    let generation = 0;
+    let unsubscribe = null;
+    let timer = 0;
+    let retryDelay = 2000;
+    let flight = null;
+    let ready = false;
+    let exists = false;
+    let base = null;
+    let receipts = {};
+    let serverRevision = 0;
+    let applying = false;
+    let observed = copy(readLocal());
+
+    function read(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw === null ? fallback : JSON.parse(raw);
+      } catch { return fallback; }
+    }
+    function write(key, value) {
+      try {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, JSON.stringify(value));
+        storageFailed = false;
+      } catch {
+        storageFailed = true;
+        setStatus("瀏覽器無法保留待同步紀錄，請保持此頁開啟", "error");
+      }
+    }
+
+    let owner = read(ownerKey, null);
+    let queueOwner = owner || "guest";
+    const makeQueue = (seed = null) => ({ writer, sequence: seed ? 1 : 0, seed, operations: {} });
+    let queue = makeQueue(owner ? null : copy(observed));
+    const queuePrefix = (uid = queueOwner) => `${prefix}.queue.${encodeURIComponent(uid)}.`;
+    const queueKey = () => `${queuePrefix()}${writer}`;
+    const cacheKey = (uid = queueOwner) => `${prefix}.base.${encodeURIComponent(uid)}`;
+
+    function persistQueue() {
+      write(queueKey(), queue.seed || Object.keys(queue.operations).length ? queue : null);
+    }
+
+    // Each tab owns a separate outbox. A reopened page can recover other
+    // outboxes without overwriting a still-open tab's newer changes.
+    function readQueues() {
+      const queues = new Map();
+      try {
+        const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+        for (const key of keys) {
+          if (!key?.startsWith(queuePrefix())) continue;
+          const item = read(key, null);
+          if (item && typeof item.writer === "string" && isObject(item.operations)) queues.set(item.writer, item);
+        }
+      } catch { /* The in-memory outbox can still be uploaded. */ }
+      queues.set(writer, queue);
+      return [...queues.values()].sort((a, b) => (a.writer === writer ? 1 : b.writer === writer ? -1 : a.writer.localeCompare(b.writer)));
+    }
+
+    function outstanding(all = readQueues(), acknowledgements = receipts) {
+      return all.map((item) => {
+        const acknowledged = Number(acknowledgements[item.writer] || 0);
+        return {
+          writer: item.writer,
+          sequence: Number(item.sequence || 0),
+          seed: acknowledged < 1 ? item.seed : null,
+          operations: Object.values(item.operations).filter((operation) => Number(operation.sequence) > acknowledged),
+        };
+      }).filter((item) => item.seed || item.operations.length);
+    }
+
+    function compose(state, batches) {
+      let next = copy(state);
+      for (const batch of batches) {
+        if (batch.seed) next = addMissing(next, batch.seed);
+        next = applyOperations(next, batch.operations);
+      }
+      return next;
+    }
+
+    function display() {
+      if (base === null) return;
+      const next = compose(base, outstanding());
+      if (!equal(readLocal(), next)) {
+        applying = true;
+        try { applyLocal(copy(next)); }
+        finally { applying = false; }
+      }
+      // Adapters may fill in defaults while rendering. Those are not edits.
+      observed = copy(readLocal());
+    }
+
+    function report() {
+      if (!user) return;
+      if (storageFailed && outstanding().length) {
+        setStatus("瀏覽器無法保留待同步紀錄，請保持此頁開啟", "error");
+      } else if (navigator.onLine === false) {
+        setStatus(outstanding().length ? "已存本機，連線後自動同步" : "離線，顯示本機進度", "pending");
+      } else if (!ready) {
+        setStatus("正在確認雲端進度…", "syncing");
+      } else if (flight) {
+        setStatus("正在儲存至雲端…", "syncing");
+      } else if (outstanding().length || !exists) {
+        setStatus("已存本機，等待雲端同步…", "pending");
+      } else {
+        setStatus("已同步至雲端", "synced");
+      }
+    }
+
+    function schedule(delay = 250) {
+      if (!user || timer) return;
+      const token = generation;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        if (token !== generation) return;
+        if (!unsubscribe) listen();
+        void flush();
+      }, delay);
+    }
+
+    function changed() {
+      if (applying) return;
+      const next = copy(readLocal());
+      // Once an account has signed out, keep the cleared local view isolated
+      // from that account's outbox. A later sign-in will load the selected
+      // account's cache or confirmed cloud state.
+      if (!user && owner) {
+        observed = next;
+        return;
+      }
+      const changes = differences(observed, next);
+      observed = next;
+      if (!changes.length) return;
+      for (const operation of changes) {
+        operation.sequence = ++queue.sequence;
+        queue.operations[JSON.stringify(operation.path)] = operation;
+      }
+      persistQueue();
+      report();
+      schedule();
+    }
+
+    function saveBase() {
+      write(cacheKey(), { state: base, receipts, revision: serverRevision, exists });
+    }
+
+    function pruneAcknowledged() {
+      const acknowledged = Number(receipts[writer] || 0);
+      if (acknowledged >= 1) queue.seed = null;
+      for (const [key, operation] of Object.entries(queue.operations)) {
+        if (operation.sequence <= acknowledged) delete queue.operations[key];
+      }
+      persistQueue();
+    }
+
+    function receive(snapshot, token) {
+      if (token !== generation || !user) return;
+      if (snapshot.metadata?.fromCache || snapshot.metadata?.hasPendingWrites) {
+        if (snapshot.metadata?.fromCache) ready = false;
+        report();
+        return;
+      }
+      try {
+        const data = snapshot.exists ? snapshot.data() || {} : {};
+        const incomingRevision = Number(data.syncRevision || 0);
+        // A transaction acknowledgement can arrive before its listener event.
+        if (incomingRevision > 0 && incomingRevision < serverRevision) return;
+        base = fromCloud(data);
+        receipts = isObject(data.syncWriters) ? data.syncWriters : {};
+        serverRevision = incomingRevision;
+        exists = snapshot.exists;
+        ready = true;
+        retryDelay = 2000;
+        pruneAcknowledged();
+        saveBase();
+        display();
+        report();
+        if (outstanding().length || !exists) schedule();
+      } catch (error) { failed(error, token, true); }
+    }
+
+    function failed(error, token, listenerFailure = false) {
+      if (token !== generation) return;
+      console.warn("FlipWords cloud synchronization will retry.", error);
+      if (listenerFailure) {
+        ready = false;
+        unsubscribe?.();
+        unsubscribe = null;
+      }
+      const message = options.describeError?.(error) || "雲端同步暫時失敗";
+      setStatus(`${message}；進度保留本機，將自動重試`, "error");
+      schedule(retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 30000);
+    }
+
+    function listen() {
+      if (!user || unsubscribe) return;
+      const token = generation;
+      try {
+        unsubscribe = getDocument(user).onSnapshot(
+          { includeMetadataChanges: true },
+          (snapshot) => receive(snapshot, token),
+          (error) => failed(error, token, true),
+        );
+      } catch (error) { failed(error, token, true); }
+    }
+
+    async function drain(token, documentReference) {
+      while (token === generation && ready && navigator.onLine !== false) {
+        const batches = copy(outstanding());
+        if (!batches.length && exists) return true;
+        const result = await db.runTransaction(async (transaction) => {
+          // Firestore retries this callback if another device writes meanwhile.
+          // Never read mutable UI state inside the retryable callback.
+          const snapshot = await transaction.get(documentReference);
+          const previous = snapshot.exists ? snapshot.data() || {} : {};
+          const remoteReceipts = isObject(previous.syncWriters) ? previous.syncWriters : {};
+          const remaining = batches.map((batch) => ({
+            ...batch,
+            seed: Number(remoteReceipts[batch.writer] || 0) < 1 ? batch.seed : null,
+            operations: batch.operations.filter((operation) => operation.sequence > Number(remoteReceipts[batch.writer] || 0)),
+          })).filter((batch) => batch.seed || batch.operations.length);
+          const state = compose(fromCloud(previous), remaining);
+          const acknowledgements = { ...remoteReceipts };
+          for (const batch of remaining) {
+            acknowledgements[batch.writer] = Math.max(Number(acknowledgements[batch.writer] || 0), batch.sequence);
+          }
+          if (snapshot.exists && !remaining.length) {
+            return { state, receipts: acknowledgements, revision: Number(previous.syncRevision || 0) };
+          }
+          const revision = Number(previous.syncRevision || 0) + 1;
+          const payload = {
+            ...previous,
+            ...toCloud(state),
+            syncRevision: revision,
+            syncWriters: acknowledgements,
+            updatedAtMs: Date.now(), // Legacy clients only; never used for conflict resolution.
+            updatedAt: window.firebase.firestore.FieldValue.serverTimestamp(),
+          };
+          if (new Blob([JSON.stringify(payload)]).size > (options.maxBytes || 900000)) {
+            throw new Error("cloud-document-too-large");
+          }
+          // An account switch must not let an old callback start another write.
+          if (token !== generation) throw new Error("sync-account-changed");
+          transaction.set(documentReference, payload);
+          return { state, receipts: acknowledgements, revision };
+        });
+        if (token !== generation) return false;
+        if (result.revision >= serverRevision) {
+          base = result.state;
+          receipts = result.receipts;
+          serverRevision = result.revision;
+        }
+        exists = true;
+        pruneAcknowledged();
+        saveBase();
+        display();
+        // Edits made while the request was in flight remain in the outbox.
+        // Continue until those newer edits have also been acknowledged.
+      }
+      return false;
+    }
+
+    function flush() {
+      window.clearTimeout(timer);
+      timer = 0;
+      if (flight) return flight;
+      if (!user || !ready || navigator.onLine === false) {
+        report();
+        return Promise.resolve(false);
+      }
+      const token = generation;
+      const documentReference = getDocument(user);
+      flight = drain(token, documentReference).then((complete) => {
+        if (token === generation) retryDelay = 2000;
+        return complete;
+      }).catch((error) => {
+        failed(error, token);
+        return false;
+      }).finally(() => {
+        if (token !== generation) return;
+        flight = null;
+        // Keep a failure visible until the next retry, instead of claiming success.
+        if (!timer) report();
+      });
+      report();
+      return flight;
+    }
+
+    function start(nextUser) {
+      if (user?.uid && user.uid === nextUser?.uid) return;
+      const previousAccountId = user?.uid || owner || null;
+      const leavingAccount = Boolean(previousAccountId && !nextUser);
+      const switchingAccount = Boolean(previousAccountId && nextUser?.uid
+        && previousAccountId !== nextUser.uid);
+      generation += 1;
+      unsubscribe?.();
+      unsubscribe = null;
+      window.clearTimeout(timer);
+      timer = 0;
+      flight = null;
+      ready = false;
+      exists = false;
+      user = nextUser;
+
+      function initializeLocalState() {
+        applying = true;
+        try { applyLocal(copy(fromCloud({}))); }
+        finally { applying = false; }
+        observed = copy(readLocal());
+      }
+
+      if (!user) {
+        if (leavingAccount) initializeLocalState();
+        return;
+      }
+
+      if (queueOwner !== user.uid) {
+        persistQueue();
+        const guest = !owner && queueOwner === "guest";
+        const guestQueues = guest ? readQueues() : [];
+        const previousGuestKey = queueKey();
+        queueOwner = user.uid;
+        if (!guest) {
+          const savedQueue = read(queueKey(), null);
+          queue = savedQueue?.writer === writer && isObject(savedQueue.operations) ? savedQueue : makeQueue();
+        } else {
+          const backupKey = `${prefix}.legacy-backup.${encodeURIComponent(user.uid)}`;
+          if (read(backupKey, null) === null) write(backupKey, copy(readLocal()));
+          for (const recovered of guestQueues) {
+            if (recovered.writer !== writer) write(`${queuePrefix()}${recovered.writer}`, recovered);
+          }
+        }
+        persistQueue();
+        if (guest) write(previousGuestKey, null);
+      }
+      owner = user.uid;
+      write(ownerKey, owner);
+      if (switchingAccount) initializeLocalState();
+      const cached = read(cacheKey(), null);
+      base = cached?.state || null;
+      receipts = cached?.receipts || {};
+      serverRevision = Number(cached?.revision || 0);
+      if (base !== null) display();
+      report();
+      listen();
+    }
+
+    function resume() {
+      if (!user) return;
+      if (!unsubscribe) listen();
+      void flush();
+    }
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", report);
+    window.addEventListener("focus", resume);
+    window.addEventListener("pagehide", () => { void flush(); });
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("storage", (event) => {
+      if (!user || !event.key?.startsWith(queuePrefix())) return;
+      display();
+      report();
+      schedule();
+    });
+
+    return { start, changed, flush };
+  }
+
+  window.FlipWordsCloudSync = { create };
+})();
+</script>
   <script>
     const defaults = ["牛肉麵", "滷肉飯", "便當", "水餃", "咖哩飯", "拉麵", "義大利麵", "雞肉飯", "鍋燒意麵", "健康餐"];
     const palette = ["#e64f2e", "#f2b705", "#0f7b63", "#2f6f9f", "#f08a4b", "#7a5cff", "#d13f64", "#4b9f47", "#284b63", "#ef6f6c"];
@@ -605,7 +1048,8 @@
     }
 
     function updateMapLink() {
-      const query = selectedChoice ? `附近 ${selectedChoice}` : "附近 午餐晚餐";
+      const query = selectedChoice || "地圖";
+      mapLink.hidden = !selectedChoice;
       mapLink.href = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
       mapLink.setAttribute("aria-label", `在 Google 地圖搜尋${query}`);
     }
@@ -645,7 +1089,7 @@
             : [];
 
           if (nextChoices.length < 2) {
-            showToast("JSON 至少需要 2 個午餐晚餐選項。");
+            showToast("JSON 至少需要 2 個清單選項。");
             return;
           }
 
@@ -811,7 +1255,7 @@
       currentRotation += finalRotation;
       canvas.style.transform = `rotate(${currentRotation}deg)`;
 
-      window.setTimeout(() => {
+      spinTimer = window.setTimeout(() => {
         const choice = choices[index];
         selectedChoice = choice;
         resultText.textContent = choice;
@@ -826,6 +1270,179 @@
         saveAndRender();
       }, 4900);
     }
+
+    const listsKey = "soul-wheel.lists.v2";
+    const activeKey = "soul-wheel.active.v2";
+    let lists = {};
+    let activeId = "";
+    let cloudSync = null;
+    let spinTimer = 0;
+    let accountGeneration = 0;
+    const listSelect = document.querySelector("#listSelect");
+    const listName = document.querySelector("#listName");
+    const syncStatus = document.querySelector("#syncStatus");
+    const safeId = id => typeof id === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(id)
+      && !["__proto__", "constructor", "prototype"].includes(id);
+    function normalizeLists(value) {
+      const result = {};
+      if (!value || typeof value !== "object" || Array.isArray(value)) return result;
+      for (const [id, item] of Object.entries(value).slice(0, 100)) {
+        if (!safeId(id) || !item || typeof item !== "object") continue;
+        result[id] = {
+          name: String(item.name || "未命名清單").slice(0, 40),
+          choices: cleanChoices(item.choices).slice(0, 300).map(s => s.slice(0, 80)),
+          history: Array.isArray(item.history) ? item.history.map(normalizeHistoryItem).filter(Boolean).slice(0, historyLimit) : [],
+          selectedChoice: String(item.selectedChoice || "").slice(0, 80),
+          avoidRepeat: item.avoidRepeat !== false
+        };
+      }
+      return result;
+    }
+    function persistLists() {
+      try { localStorage.setItem(listsKey, JSON.stringify({lists})); localStorage.setItem(activeKey, activeId); }
+      catch { showToast("瀏覽器無法儲存，請匯出備份並保持頁面開啟。"); }
+    }
+    function displayList() {
+      const item = lists[activeId];
+      choices = item ? [...item.choices] : [];
+      history = item ? [...item.history] : [];
+      selectedChoice = item?.selectedChoice || "";
+      avoidRepeat.checked = item?.avoidRepeat !== false;
+      resultText.textContent = selectedChoice || (item ? "先轉一下" : "請先新增清單");
+      listSelect.replaceChildren();
+      for (const [id, list] of Object.entries(lists)) {
+        const option = document.createElement("option");
+        option.value = id; option.textContent = list.name;
+        listSelect.append(option);
+      }
+      listSelect.value = activeId;
+      document.querySelector("#currentListTitle").textContent = item ? `${item.name}・選項` : "清單選項";
+      drawWheel(); renderChoices(); renderHistory(); updateMapLink();
+      document.querySelectorAll(".control-panel button, .control-panel input").forEach(el => el.disabled = !item || spinning);
+      listSelect.disabled = spinning || !item;
+      listName.disabled = spinning;
+      document.querySelector("#createListBtn").disabled = spinning;
+    }
+    loadState = function () {
+      try {
+        const raw = localStorage.getItem(listsKey);
+        if (raw !== null) lists = normalizeLists(JSON.parse(raw)?.lists);
+        else {
+          const old = JSON.parse(localStorage.getItem(stateKey) || "null");
+          lists = normalizeLists({original: {name: "原有清單", ...(old || {choices: defaults})}});
+        }
+        activeId = localStorage.getItem(activeKey) || "";
+      } catch { lists = {}; }
+      if (!lists[activeId]) activeId = Object.keys(lists)[0] || "";
+      displayList();
+    };
+    saveState = function () {
+      if (lists[activeId]) Object.assign(lists[activeId], {choices: [...choices], history: [...history], selectedChoice, avoidRepeat: avoidRepeat.checked});
+      persistLists();
+      cloudSync?.changed();
+    };
+    const originalRender = saveAndRender;
+    saveAndRender = function () { originalRender(); displayList(); };
+    document.querySelector("#listForm").addEventListener("submit", event => {
+      event.preventDefault();
+      if (spinning) return;
+      const name = listName.value.trim();
+      if (!name) return;
+      if (Object.keys(lists).length >= 100) return showToast("最多可建立 100 個清單。");
+      saveState();
+      activeId = crypto.randomUUID();
+      lists[activeId] = {name, choices: [], history: [], selectedChoice: "", avoidRepeat: true};
+      listName.value = "";
+      displayList(); saveState();
+      newChoice.focus();
+    });
+    listSelect.addEventListener("change", () => {
+      if (spinning) return;
+      saveState(); activeId = listSelect.value; displayList(); persistLists();
+    });
+    const originalSpin = spin;
+    spin = function () { originalSpin(); if (spinning) {
+      document.querySelectorAll(".control-panel button, .control-panel input, #listSelect, #listName, #createListBtn").forEach(el => el.disabled = true);
+    }};
+    downloadJson = function () {
+      saveState();
+      const url = URL.createObjectURL(new Blob([JSON.stringify({app: "soul-wheel", version: 2, lists}, null, 2)], {type: "application/json"}));
+      const link = document.createElement("a"); link.href = url; link.download = "soul-wheel-backup.json";
+      link.click(); URL.revokeObjectURL(url);
+    };
+    importJsonFile = async function (file) {
+      if (!file) return;
+      const generation = accountGeneration;
+      try {
+        const data = JSON.parse(await file.text());
+        if (generation !== accountGeneration || spinning) return showToast("狀態已變更，請重新匯入。");
+        const imported = data.lists ? normalizeLists(data.lists) : normalizeLists({legacy: {...data, name: "匯入清單"}});
+        if (!Object.keys(imported).length) throw Error("empty");
+        if (Object.keys(imported).length + Object.keys(lists).length > 100) return showToast("匯入後超過 100 個清單。");
+        saveState();
+        for (const item of Object.values(imported)) { activeId = crypto.randomUUID(); lists[activeId] = item; }
+        displayList(); saveState(); showToast("已新增匯入清單");
+      } catch { showToast("無法讀取清單備份。"); }
+      finally { importFile.value = ""; }
+    };
+    function startCloud() {
+      if (!window.firebase || !window.FlipWordsCloudSync) {
+        syncStatus.textContent = "雲端程式載入失敗；清單仍存本機，請重新整理。";
+        return;
+      }
+      const app = firebase.initializeApp({
+        apiKey: "AIzaSyBs0Ki3aNMxcPQvqegEE44HXbajkq2YS5Y",
+        authDomain: "flipwords-toeic.firebaseapp.com",
+        projectId: "flipwords-toeic",
+        appId: "1:637551440168:web:e3d4248935083e050fe01d"
+      }, "soul-wheel");
+      const auth = app.auth(), db = app.firestore();
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({prompt: "select_account"});
+      const login = document.querySelector("#login"), logout = document.querySelector("#logout");
+      const status = (message) => { syncStatus.textContent = message; };
+      cloudSync = FlipWordsCloudSync.create({
+        db, getDocument: user => db.collection("users").doc(user.uid).collection("apps").doc("soul-wheel"),
+        storagePrefix: "soul-wheel", readLocal: () => ({lists}),
+        fromCloud: data => ({lists: normalizeLists(data.lists)}),
+        toCloud: data => ({schemaVersion: 2, lists: normalizeLists(data.lists)}),
+        applyLocal: data => {
+          window.clearTimeout(spinTimer); spinning = false; spinBtn.textContent = "開始";
+          currentRotation = 0; canvas.style.transition = "none"; canvas.style.transform = "rotate(0deg)";
+          void canvas.offsetWidth; canvas.style.transition = "";
+          lists = normalizeLists(data.lists);
+          if (!lists[activeId]) activeId = Object.keys(lists)[0] || "";
+          persistLists(); displayList();
+        },
+        setStatus: status,
+        describeError: error => error?.code === "permission-denied" ? "雲端存取被拒，請檢查 Firebase 權限" : "雲端同步失敗",
+        maxBytes: 850000
+      });
+      login.addEventListener("click", async () => {
+        login.disabled = true;
+        try { await auth.signInWithPopup(provider); }
+        catch { status("Google 登入未完成，請允許登入視窗後再試。"); }
+        finally { login.disabled = false; }
+      });
+      logout.addEventListener("click", async () => {
+        logout.disabled = true;
+        let timer;
+        try {
+          const flushed = await Promise.race([cloudSync.flush(), new Promise(resolve => {timer = setTimeout(() => resolve(false), 10000);})]);
+          if (!flushed) { status("清單尚未同步，請連線完成同步後再登出。"); return; }
+          await auth.signOut();
+        } catch { status("登出未完成，請再試一次。"); }
+        finally { clearTimeout(timer); logout.disabled = false; }
+      });
+      auth.onAuthStateChanged(user => {
+        accountGeneration++;
+        login.hidden = Boolean(user); logout.hidden = !user;
+        document.querySelector("#accountName").textContent = user?.displayName || user?.email || "";
+        cloudSync.start(user);
+        if (!user) status("本機儲存・Google 登入後同步清單");
+      });
+    }
+    window.addEventListener("load", startCloud);
 
     addForm.addEventListener("submit", event => {
       event.preventDefault();
@@ -879,7 +1496,8 @@
     });
 
     document.querySelector("#resetBtn").addEventListener("click", () => {
-      choices = [...defaults];
+      if (!confirm("重設目前清單的選項與抽選紀錄？其他清單不受影響。")) return;
+      choices = [];
       history = [];
       selectedChoice = "";
       avoidRepeat.checked = true;
@@ -887,7 +1505,7 @@
       currentRotation = 0;
       canvas.style.transform = "rotate(0deg)";
       saveAndRender();
-      showToast("已全部重設");
+      showToast("已重設目前清單");
     });
 
     spinBtn.addEventListener("click", spin);
